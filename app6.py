@@ -296,24 +296,34 @@ def simulate_consortium(inp: Inputs) -> dict:
                     debt_at_contemplation = post_balance_debt
 
             else:
-                # Pós-contemplação: reajusta o saldo devedor e divide pelos meses restantes
-                # Meses restantes = prazo total menos parcelas pagas antes da contemplação
-                # menos os meses já decorridos após contemplação
+                # Pós-contemplação: amortização linear + reajuste anual da parcela pelo INCC
                 months_after_contemplation = m - contemplation_month
-                # Parcelas pagas pré-contemplação contam como meses do plano consumidos
                 months_elapsed_in_plan = installments_paid_pre + months_after_contemplation
-                remaining_installments = max(inp.term_months - months_elapsed_in_plan, 1)
+                remaining_installments = inp.term_months - months_elapsed_in_plan
 
-                # Reajusta o saldo devedor pelo índice pós
-                post_balance_debt = post_balance_debt * (1 + post_adj_m)
-                installment = post_balance_debt / remaining_installments
-                insurance = current_credit_reference * (inp.insurance_monthly_pct_of_credit / 100.0)
+                if remaining_installments <= 0 or post_balance_debt <= 0.01:
+                    # Plano quitado — sem parcela nem seguro
+                    installment = 0.0
+                    insurance = 0.0
+                    post_balance_debt = 0.0
+                else:
+                    # Parcela base = saldo devedor na contemplação ÷ meses restantes no plano (fixa)
+                    # Reajustada anualmente pelo INCC (a cada 12 meses pós-contemplação)
+                    total_remaining_at_contemplation = inp.term_months - installments_paid_pre
+                    base_installment = debt_at_contemplation / max(total_remaining_at_contemplation, 1)
+
+                    # Reajuste anual: a cada 12 meses pós-contemplação, aplica INCC acumulado
+                    years_post = months_after_contemplation // 12
+                    annual_adj = (1 + inp.adjustment_post_annual / 100.0) ** years_post
+                    installment = base_installment * annual_adj
+
+                    insurance = current_credit_reference * (inp.insurance_monthly_pct_of_credit / 100.0)
+                    post_balance_debt = max(post_balance_debt - installment, 0.0)
 
                 balance -= (installment + insurance)
                 cumulative_installments += installment
                 cumulative_insurance += insurance
                 out_of_pocket_total += installment + insurance
-                post_balance_debt = max(post_balance_debt - installment, 0.0)
                 current_installment = installment + insurance
 
             if purchased:
@@ -698,35 +708,57 @@ try:
             st.metric("Patrimônio Financeiro (Caixa)", fmt_brl(cons_result["final_financial_wealth"]))
             st.metric("Patrimônio Imobiliário", fmt_brl(cons_result["final_real_estate_wealth"]))
             st.metric("Desembolso Total do Bolso", fmt_brl(cons_result["out_of_pocket_total"]))
+            if cons_result["final_cumulative_property_topup"] > 0:
+                st.metric(
+                    "Complemento próprio p/ cobrir imóvel",
+                    fmt_brl(cons_result["final_cumulative_property_topup"]),
+                    help="Valor tirado do caixa porque a carta líquida (após lance embutido) não cobriu o preço do imóvel"
+                )
+            if cons_result["final_cumulative_bid_own_cash"] > 0:
+                st.metric("Lance do próprio bolso", fmt_brl(cons_result["final_cumulative_bid_own_cash"]))
+            if cons_result["final_cumulative_bid_embedded"] > 0:
+                st.metric("Lance embutido (da carta)", fmt_brl(cons_result["final_cumulative_bid_embedded"]))
             st.metric("IR pago sobre rendimentos", fmt_brl(cons_result["cumulative_ir_paid"]))
             if inp.monthly_savings > 0:
                 st.metric("Total aportado no período", fmt_brl(cons_result["cumulative_savings"]))
 
         st.divider()
         st.markdown("### 📊 Comparativo Final")
+        comp_metrics = ["Patrimônio Total", "Patrimônio Financeiro", "Patrimônio Imobiliário", "Desembolso Total", "IR pago (rendimentos)"]
+        comp_cash = [
+            cash_result["final_total_wealth"],
+            cash_result["final_financial_wealth"],
+            cash_result["final_real_estate_wealth"],
+            cash_result["out_of_pocket_total"],
+            cash_result["cumulative_ir_paid"],
+        ]
+        comp_cons = [
+            cons_result["final_total_wealth"],
+            cons_result["final_financial_wealth"],
+            cons_result["final_real_estate_wealth"],
+            cons_result["out_of_pocket_total"],
+            cons_result["cumulative_ir_paid"],
+        ]
+
+        # Adicionar linhas detalhadas do consórcio se relevantes
+        if cons_result["final_cumulative_property_topup"] > 0:
+            comp_metrics.append("Complemento próprio p/ imóvel")
+            comp_cash.append(0.0)
+            comp_cons.append(cons_result["final_cumulative_property_topup"])
+        if cons_result["final_cumulative_bid_own_cash"] > 0:
+            comp_metrics.append("Lance do próprio bolso")
+            comp_cash.append(0.0)
+            comp_cons.append(cons_result["final_cumulative_bid_own_cash"])
+        if cons_result["final_cumulative_bid_embedded"] > 0:
+            comp_metrics.append("Lance embutido (da carta)")
+            comp_cash.append(0.0)
+            comp_cons.append(cons_result["final_cumulative_bid_embedded"])
+
         comp_df = pd.DataFrame({
-            "Métrica": ["Patrimônio Total", "Patrimônio Financeiro", "Patrimônio Imobiliário", "Desembolso Total", "IR pago (rendimentos)"],
-            "À Vista": [
-                fmt_brl(cash_result["final_total_wealth"]),
-                fmt_brl(cash_result["final_financial_wealth"]),
-                fmt_brl(cash_result["final_real_estate_wealth"]),
-                fmt_brl(cash_result["out_of_pocket_total"]),
-                fmt_brl(cash_result["cumulative_ir_paid"]),
-            ],
-            "Consórcio": [
-                fmt_brl(cons_result["final_total_wealth"]),
-                fmt_brl(cons_result["final_financial_wealth"]),
-                fmt_brl(cons_result["final_real_estate_wealth"]),
-                fmt_brl(cons_result["out_of_pocket_total"]),
-                fmt_brl(cons_result["cumulative_ir_paid"]),
-            ],
-            "Diferença (Consórcio − À Vista)": [
-                fmt_brl(cons_result["final_total_wealth"] - cash_result["final_total_wealth"]),
-                fmt_brl(cons_result["final_financial_wealth"] - cash_result["final_financial_wealth"]),
-                fmt_brl(cons_result["final_real_estate_wealth"] - cash_result["final_real_estate_wealth"]),
-                fmt_brl(cons_result["out_of_pocket_total"] - cash_result["out_of_pocket_total"]),
-                fmt_brl(cons_result["cumulative_ir_paid"] - cash_result["cumulative_ir_paid"]),
-            ],
+            "Métrica": comp_metrics,
+            "À Vista": [fmt_brl(v) for v in comp_cash],
+            "Consórcio": [fmt_brl(v) for v in comp_cons],
+            "Diferença (Consórcio − À Vista)": [fmt_brl(c - a) for c, a in zip(comp_cons, comp_cash)],
         })
         st.dataframe(comp_df, hide_index=True, use_container_width=True)
 
